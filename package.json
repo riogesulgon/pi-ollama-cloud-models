@@ -1,0 +1,36 @@
+{
+  "name": "pi-ollama-cloud-models",
+  "version": "0.1.0",
+  "description": "pi extension that auto-discovers Ollama Cloud models from ollama.com and registers them as an `ollama-cloud` provider.",
+  "keywords": ["pi-package", "ollama", "ollama-cloud", "pi", "extension"],
+  "license": "MIT",
+  "author": "Rio Gesulgon <rio.g.gesulgon@gmail.com>",
+  "homepage": "https://github.com/riogesulgon/pi-ollama-cloud-models#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/riogesulgon/pi-ollama-cloud-models.git"
+  },
+  "bugs": {
+    "url": "https://github.com/riogesulgon/pi-ollama-cloud-models/issues"
+  },
+  "type": "module",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "typebox": { "optional": true }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
