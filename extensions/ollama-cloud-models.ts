@@ -54,6 +54,22 @@ interface CacheShape {
   models: CloudModelDef[];
 }
 
+export type CloudModelLoaderState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; models: CloudModelDef[] }
+  | { status: "failed"; error: unknown; models: CloudModelDef[] };
+
+export interface CloudModelLoaderDeps {
+  readCache: () => Promise<CacheShape | null>;
+  writeCache: (cache: CacheShape) => Promise<void>;
+  fetch: (signal?: AbortSignal) => Promise<CloudModelDef[]>;
+  register: (models: CloudModelDef[]) => void;
+  updateStatus: (status: unknown | null) => void;
+  now: () => number;
+  timeout: (milliseconds: number) => AbortSignal | undefined;
+}
+
 /** Build the cloud-routed model id the local Ollama daemon expects. */
 function cloudId(baseId: string): string {
   return baseId.includes(":") ? `${baseId}-cloud` : `${baseId}:cloud`;
@@ -170,50 +186,73 @@ function register(pi: ExtensionAPI, models: CloudModelDef[]): void {
   });
 }
 
-export default async function (pi: ExtensionAPI): Promise<void> {
-  let models: CloudModelDef[] = [];
-  const cache = await readCache();
-  const cacheFresh =
-    cache && cache.models.length > 0 && Date.now() - cache.fetchedAt < CACHE_TTL_MS;
+export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
+  start: () => Promise<void>;
+  retry: () => Promise<void>;
+  state: () => CloudModelLoaderState;
+} {
+  let current: CloudModelLoaderState = { status: "idle" };
+  let inFlight: Promise<void> | null = null;
 
-  if (cacheFresh) {
-    models = cache!.models;
-  } else {
-    try {
-      models = await fetchCloudModels(
-        AbortSignal.timeout(STARTUP_TIMEOUT_MS) as unknown as AbortSignal,
-      );
-      if (models.length > 0) {
-        await writeCache({ fetchedAt: Date.now(), models });
-      }
-    } catch (err) {
-      // Network failed: fall back to stale cache if we have one.
-      if (cache && cache.models.length > 0) {
-        models = cache.models;
-      } else {
-        console.error("[ollama-cloud-models] startup fetch failed:", err);
-      }
+  const load = async (): Promise<void> => {
+    current = { status: "loading" };
+    deps.updateStatus("loading");
+    const cache = await deps.readCache();
+    const cacheFresh =
+      cache !== null &&
+      cache.models.length > 0 &&
+      deps.now() - cache.fetchedAt < CACHE_TTL_MS;
+
+    if (cacheFresh) {
+      deps.register(cache.models);
+      current = { status: "ready", models: cache.models };
+      deps.updateStatus(null);
+      return;
     }
-  }
 
-  if (models.length > 0) register(pi, models);
-
-  pi.registerCommand("ollama-cloud-refresh", {
-    description: "Refresh the Ollama Cloud model list from ollama.com",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify("Refreshing Ollama Cloud models…", "info");
-      try {
-        const fresh = await fetchCloudModels();
-        if (fresh.length === 0) {
-          ctx.ui.notify("Ollama Cloud returned no models", "error");
-          return;
-        }
-        register(pi, fresh);
-        await writeCache({ fetchedAt: Date.now(), models: fresh });
-        ctx.ui.notify(`Ollama Cloud: ${fresh.length} models available`, "info");
-      } catch (err) {
-        ctx.ui.notify(`Failed to refresh Ollama Cloud: ${String(err)}`, "error");
+    try {
+      const models = await deps.fetch(deps.timeout(STARTUP_TIMEOUT_MS));
+      if (models.length > 0) {
+        deps.register(models);
+        await deps.writeCache({ fetchedAt: deps.now(), models });
       }
+      current = { status: "ready", models };
+      deps.updateStatus(null);
+    } catch (error) {
+      const staleModels = cache?.models ?? [];
+      if (staleModels.length > 0) deps.register(staleModels);
+      current = { status: "failed", error, models: staleModels };
+      deps.updateStatus(error);
+      throw error;
+    }
+  };
+
+  const start = (): Promise<void> => {
+    if (inFlight) return inFlight;
+    inFlight = load().finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
+  };
+
+  return { start, retry: start, state: () => current };
+}
+
+function createDefaultLoader(pi: ExtensionAPI) {
+  return createCloudModelLoader({
+    readCache,
+    writeCache,
+    fetch: fetchCloudModels,
+    register: (models) => register(pi, models),
+    updateStatus: (status) => {
+      if (status !== null) console.error("[ollama-cloud-models] load status:", status);
     },
+    now: Date.now,
+    timeout: (milliseconds) => AbortSignal.timeout(milliseconds),
   });
+}
+
+/** The factory is side-effect free; lifecycle wiring starts the loader later. */
+export default function (pi: ExtensionAPI): void {
+  createDefaultLoader(pi);
 }
