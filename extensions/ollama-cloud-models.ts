@@ -44,11 +44,13 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const SHOW_CONCURRENCY = 6;
 const STARTUP_TIMEOUT_MS = 15_000;
 
+type CloudInput = "text" | "image";
+
 interface CloudModelDef {
   id: string; // cloud-suffixed id passed to the local Ollama daemon
   baseId: string; // raw id from /v1/models
   reasoning: boolean;
-  input: string[];
+  input: CloudInput[];
   contextWindow: number;
   capabilities: string[];
 }
