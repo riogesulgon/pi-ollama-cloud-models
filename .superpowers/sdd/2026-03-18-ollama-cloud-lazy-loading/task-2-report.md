@@ -57,3 +57,20 @@ passed
 - Removed every fixed `setTimeout(20)` from lifecycle and race tests.
 - Added condition-based `waitFor` gates for fetch invocation and status transitions.
 - Strengthened retry coverage to assert failed state/error status, successful recovery to `ready`, and cleared status after retry.
+
+## Final review follow-up
+
+- Added a bounded 1-second timeout to the condition-based `waitFor` helper so a broken lifecycle transition fails promptly instead of hanging.
+
+Verification:
+
+```text
+node --experimental-strip-types --test test/ollama-cloud-models.test.mjs
+19 tests, 19 passed, 0 failed
+
+node --experimental-strip-types --check extensions/ollama-cloud-models.ts
+passed
+
+git diff --check
+passed
+```

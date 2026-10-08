@@ -40,9 +40,23 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function waitFor(predicate) {
-  return new Promise((resolve) => {
-    const check = () => predicate() ? resolve() : setImmediate(check);
+function waitFor(predicate, timeoutMs = 1_000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      settled = true;
+      reject(new Error(`condition not met within ${timeoutMs}ms`));
+    }, timeoutMs);
+    const check = () => {
+      if (settled) return;
+      if (predicate()) {
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      } else {
+        setImmediate(check);
+      }
+    };
     check();
   });
 }
