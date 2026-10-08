@@ -51,3 +51,9 @@ passed
 git diff --check
 passed
 ```
+
+## Deterministic timing follow-up
+
+- Removed every fixed `setTimeout(20)` from lifecycle and race tests.
+- Added condition-based `waitFor` gates for fetch invocation and status transitions.
+- Strengthened retry coverage to assert failed state/error status, successful recovery to `ready`, and cleared status after retry.

@@ -40,6 +40,13 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function waitFor(predicate) {
+  return new Promise((resolve) => {
+    const check = () => predicate() ? resolve() : setImmediate(check);
+    check();
+  });
+}
+
 function deps(overrides = {}) {
   return {
     readCache: async () => null,
@@ -92,11 +99,11 @@ test("session_start begins exactly one deferred load and reports success", async
       const ctx = { ui: { setStatus: (...args) => statuses.push(args) } };
       sessionStart({}, ctx);
       sessionStart({}, ctx);
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await waitFor(() => fetchCalls === 1);
       assert.equal(fetchCalls, 1);
       assert.deepEqual(statuses, [["ollama-cloud", "Loading Ollama Cloud models…"]]);
       pending.resolve({ ok: true, json: async () => ({ data: [] }) });
-      await new Promise((resolve) => setImmediate(resolve));
+      await waitFor(() => statuses.length === 2);
       assert.deepEqual(statuses, [
         ["ollama-cloud", "Loading Ollama Cloud models…"],
         ["ollama-cloud", undefined],
@@ -139,7 +146,7 @@ test("factory registers refresh and retry commands; retry recovers after failure
       extension(pi);
       assert.deepEqual([...commands.keys()], ["ollama-cloud-refresh", "ollama-cloud-retry"]);
       sessionStart({}, ctx);
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await waitFor(() => statuses.at(-1)?.[1] === "Ollama Cloud unavailable — /ollama-cloud-retry");
       assert.equal(statuses.at(-1)[1], "Ollama Cloud unavailable — /ollama-cloud-retry");
       await assert.doesNotReject(() => commands.get("ollama-cloud-retry")("", ctx));
       assert.equal(fetchCalls, 2);
@@ -352,10 +359,10 @@ test("refresh prevents stale startup completion from overwriting fresh models", 
 
   const startupLoad = loader.start();
   const refreshLoad = loader.refresh();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(() => fetchCalls === 1);
   assert.equal(fetchCalls, 1);
   startup.resolve([stale]);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(() => fetchCalls === 2);
   assert.equal(fetchCalls, 2);
   refresh.resolve([fresh]);
   await Promise.all([startupLoad, refreshLoad]);
@@ -365,20 +372,27 @@ test("refresh prevents stale startup completion from overwriting fresh models", 
 
 test("retry is a no-op unless the previous load failed", async () => {
   let fetchCalls = 0;
+  const statuses = [];
   const loader = createCloudModelLoader(
     deps({
       fetch: async () => {
         fetchCalls++;
+        if (fetchCalls === 1) throw new Error("offline");
         return [model];
       },
+      updateStatus: (status) => statuses.push(status),
     }),
   );
 
   await loader.retry();
   assert.equal(fetchCalls, 0);
-  await loader.start();
+  await assert.rejects(loader.start(), /offline/);
+  assert.equal(loader.state().status, "failed");
+  assert.equal(statuses.at(-1).message, "offline");
   await loader.retry();
-  assert.equal(fetchCalls, 1);
+  assert.equal(fetchCalls, 2);
+  assert.deepEqual(loader.state(), { status: "ready", models: [model] });
+  assert.equal(statuses.at(-1), null);
 });
 
 test("successful fetch writes cache and propagates timeout signal", async () => {
