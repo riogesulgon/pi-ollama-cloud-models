@@ -29,3 +29,16 @@ git diff --check                                                   # passed
 
 - The default extension factory now only constructs the loader and does not start it or register commands. This is intentional for Task 1; Task 2 must wire lifecycle startup and refresh behavior.
 - `updateStatus` is intentionally generic (`unknown | null`) so Task 2 can adapt it to its lifecycle/UI status surface.
+
+## Review follow-up
+
+- Wrapped cache reads and status setup/cleanup in the loader error boundary so dependency rejection transitions to `failed` and remains retryable.
+- Kept successful registration/state intact when cache persistence rejects; cache writes remain best-effort.
+- Added coverage for cache-reader rejection, cache-write rejection, fresh-cache short-circuiting, timeout signal propagation, cache payloads, and exact provider mapping.
+
+Follow-up verification:
+
+```text
+node --experimental-strip-types --test test/ollama-cloud-models.test.mjs
+11 tests, 11 passed, 0 failed
+```

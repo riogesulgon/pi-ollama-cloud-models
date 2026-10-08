@@ -65,7 +65,7 @@ export interface CloudModelLoaderDeps {
   writeCache: (cache: CacheShape) => Promise<void>;
   fetch: (signal?: AbortSignal) => Promise<CloudModelDef[]>;
   register: (models: CloudModelDef[]) => void;
-  updateStatus: (status: unknown | null) => void;
+  updateStatus: (status: unknown | null) => void | Promise<void>;
   now: () => number;
   timeout: (milliseconds: number) => AbortSignal | undefined;
 }
@@ -164,7 +164,7 @@ async function writeCache(cache: CacheShape): Promise<void> {
 }
 
 /** Register (or replace) the ollama-cloud provider with the given model list. */
-function register(pi: ExtensionAPI, models: CloudModelDef[]): void {
+export function register(pi: ExtensionAPI, models: CloudModelDef[]): void {
   pi.registerProvider(PROVIDER, {
     name: PROVIDER_NAME,
     baseUrl: LOCAL_BASE_URL,
@@ -195,34 +195,51 @@ export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
   let inFlight: Promise<void> | null = null;
 
   const load = async (): Promise<void> => {
-    current = { status: "loading" };
-    deps.updateStatus("loading");
-    const cache = await deps.readCache();
-    const cacheFresh =
-      cache !== null &&
-      cache.models.length > 0 &&
-      deps.now() - cache.fetchedAt < CACHE_TTL_MS;
-
-    if (cacheFresh) {
-      deps.register(cache.models);
-      current = { status: "ready", models: cache.models };
-      deps.updateStatus(null);
-      return;
-    }
-
+    const updateStatus = (status: unknown | null): Promise<void> | undefined => {
+      const result = deps.updateStatus(status);
+      return result && typeof result.then === "function" ? result : undefined;
+    };
+    let cache: CacheShape | null = null;
     try {
+      current = { status: "loading" };
+      const loadingStatus = updateStatus("loading");
+      if (loadingStatus) await loadingStatus;
+      cache = await deps.readCache();
+      const cacheFresh =
+        cache !== null &&
+        cache.models.length > 0 &&
+        deps.now() - cache.fetchedAt < CACHE_TTL_MS;
+
+      if (cacheFresh) {
+        deps.register(cache.models);
+        current = { status: "ready", models: cache.models };
+        const readyStatus = updateStatus(null);
+        if (readyStatus) await readyStatus;
+        return;
+      }
+
       const models = await deps.fetch(deps.timeout(STARTUP_TIMEOUT_MS));
       if (models.length > 0) {
         deps.register(models);
-        await deps.writeCache({ fetchedAt: deps.now(), models });
+        try {
+          await deps.writeCache({ fetchedAt: deps.now(), models });
+        } catch {
+          // Cache is best-effort; a successful fetch remains ready.
+        }
       }
       current = { status: "ready", models };
-      deps.updateStatus(null);
+      const readyStatus = updateStatus(null);
+      if (readyStatus) await readyStatus;
     } catch (error) {
       const staleModels = cache?.models ?? [];
       if (staleModels.length > 0) deps.register(staleModels);
       current = { status: "failed", error, models: staleModels };
-      deps.updateStatus(error);
+      try {
+        const failedStatus = updateStatus(error);
+        if (failedStatus) await failedStatus;
+      } catch {
+        // Status reporting must not mask the original load failure.
+      }
       throw error;
     }
   };

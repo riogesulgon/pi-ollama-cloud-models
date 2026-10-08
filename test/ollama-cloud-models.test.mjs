@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import extension, { createCloudModelLoader } from "../extensions/ollama-cloud-models.ts";
+import extension, { createCloudModelLoader, register } from "../extensions/ollama-cloud-models.ts";
 
 const model = {
   id: "glm-5.2:cloud",
@@ -106,6 +106,24 @@ test("successful load clears status", async () => {
   assert.equal(statuses.at(-1), null);
 });
 
+test("cache reader rejection transitions to failed and retry remains available", async () => {
+  let attempts = 0;
+  const loader = createCloudModelLoader(
+    deps({
+      readCache: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error("cache unavailable");
+        return null;
+      },
+    }),
+  );
+
+  await assert.rejects(loader.start(), /cache unavailable/);
+  assert.equal(loader.state().status, "failed");
+  await loader.retry();
+  assert.equal(loader.state().status, "ready");
+});
+
 test("failed load transitions to failed and retry can succeed", async () => {
   let attempts = 0;
   const loader = createCloudModelLoader(
@@ -123,6 +141,90 @@ test("failed load transitions to failed and retry can succeed", async () => {
   await loader.retry();
   assert.equal(attempts, 2);
   assert.equal(loader.state().status, "ready");
+});
+
+test("cache write rejection does not fail a successful load", async () => {
+  let registered;
+  const loader = createCloudModelLoader(
+    deps({
+      writeCache: async () => {
+        throw new Error("disk full");
+      },
+      register: (models) => {
+        registered = models;
+      },
+    }),
+  );
+
+  await loader.start();
+  assert.deepEqual(registered, [model]);
+  assert.equal(loader.state().status, "ready");
+});
+
+test("fresh cache registers without fetching", async () => {
+  const cached = { fetchedAt: 900, models: [model] };
+  let fetchCalls = 0;
+  let registered;
+  const loader = createCloudModelLoader(
+    deps({
+      readCache: async () => cached,
+      fetch: async () => {
+        fetchCalls++;
+        return [];
+      },
+      register: (models) => {
+        registered = models;
+      },
+    }),
+  );
+
+  await loader.start();
+  assert.equal(fetchCalls, 0);
+  assert.deepEqual(registered, [model]);
+  assert.equal(loader.state().status, "ready");
+});
+
+test("successful fetch writes cache and propagates timeout signal", async () => {
+  const signal = new AbortController().signal;
+  let timeoutMs;
+  let receivedSignal;
+  let written;
+  const loader = createCloudModelLoader(
+    deps({
+      timeout: (milliseconds) => {
+        timeoutMs = milliseconds;
+        return signal;
+      },
+      fetch: async (received) => {
+        receivedSignal = received;
+        return [model];
+      },
+      writeCache: async (cache) => {
+        written = cache;
+      },
+    }),
+  );
+
+  await loader.start();
+  assert.equal(timeoutMs, 15_000);
+  assert.strictEqual(receivedSignal, signal);
+  assert.deepEqual(written.models, [model]);
+});
+
+test("provider mapping preserves cloud model fields", () => {
+  let provider;
+  register({ registerProvider: (_name, value) => (provider = value) }, [model]);
+  assert.equal(provider.name, "Ollama Cloud");
+  assert.equal(provider.baseUrl, "http://127.0.0.1:11434/v1");
+  assert.deepEqual(provider.models, [{
+    id: model.id,
+    name: model.baseId,
+    reasoning: true,
+    input: ["text"],
+    contextWindow: model.contextWindow,
+    maxTokens: 32768,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  }]);
 });
 
 test("stale cache is registered after fetch rejection", async () => {
