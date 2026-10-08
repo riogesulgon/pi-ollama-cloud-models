@@ -1,6 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import extension, { createCloudModelLoader, register } from "../extensions/ollama-cloud-models.ts";
+
+const cacheFile = join(homedir(), ".pi", "agent", "extensions", ".ollama-cloud-cache.json");
+
+async function withoutCache(callback) {
+  let backup;
+  try {
+    backup = await readFile(cacheFile);
+  } catch {}
+  await unlink(cacheFile).catch(() => {});
+  try {
+    return await callback();
+  } finally {
+    if (backup) await writeFile(cacheFile, backup);
+    else await unlink(cacheFile).catch(() => {});
+  }
+}
 
 const model = {
   id: "glm-5.2:cloud",
@@ -49,14 +68,15 @@ test("factory invocation does not fetch models", () => {
   assert.equal(fetchCalls, 0);
 });
 
-test("factory registers lifecycle and commands, then session_start loads once", async () => {
+test("session_start begins exactly one deferred load and reports success", async () => {
+  const pending = deferred();
   let sessionStart;
   let fetchCalls = 0;
   const statuses = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
     fetchCalls++;
-    throw new Error("offline");
+    return pending.promise;
   };
   const pi = {
     registerProvider() {},
@@ -66,19 +86,68 @@ test("factory registers lifecycle and commands, then session_start loads once", 
     },
     registerCommand() {},
   };
-  try {
-    extension(pi);
-    const ctx = { ui: { setStatus: (...args) => statuses.push(args) } };
-    sessionStart({}, ctx);
-    sessionStart({}, ctx);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-  assert.equal(fetchCalls <= 1, true);
-  assert.equal(statuses[0][0], "ollama-cloud");
-  assert.equal(statuses[0][1], "Loading Ollama Cloud models…");
-  assert.equal(statuses.length, 2);
+  await withoutCache(async () => {
+    try {
+      extension(pi);
+      const ctx = { ui: { setStatus: (...args) => statuses.push(args) } };
+      sessionStart({}, ctx);
+      sessionStart({}, ctx);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(fetchCalls, 1);
+      assert.deepEqual(statuses, [["ollama-cloud", "Loading Ollama Cloud models…"]]);
+      pending.resolve({ ok: true, json: async () => ({ data: [] }) });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(statuses, [
+        ["ollama-cloud", "Loading Ollama Cloud models…"],
+        ["ollama-cloud", undefined],
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("factory registers refresh and retry commands; retry recovers after failure", async () => {
+  let sessionStart;
+  const commands = new Map();
+  const statuses = [];
+  const notifications = [];
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) throw new Error("offline");
+    return { ok: true, json: async () => ({ data: [] }) };
+  };
+  const pi = {
+    registerProvider() {},
+    on(_event, handler) {
+      sessionStart = handler;
+    },
+    registerCommand(name, options) {
+      commands.set(name, options.handler);
+    },
+  };
+  const ctx = {
+    ui: {
+      setStatus: (...args) => statuses.push(args),
+      notify: (...args) => notifications.push(args),
+    },
+  };
+  await withoutCache(async () => {
+    try {
+      extension(pi);
+      assert.deepEqual([...commands.keys()], ["ollama-cloud-refresh", "ollama-cloud-retry"]);
+      sessionStart({}, ctx);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(statuses.at(-1)[1], "Ollama Cloud unavailable — /ollama-cloud-retry");
+      await assert.doesNotReject(() => commands.get("ollama-cloud-retry")("", ctx));
+      assert.equal(fetchCalls, 2);
+      assert.deepEqual(notifications.at(-1), ["Ollama Cloud models loaded", "info"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 test("start returns before a deferred fetch resolves", async () => {
@@ -262,6 +331,36 @@ test("refresh waits for existing work and bypasses fresh cache", async () => {
   await loader.refresh();
   assert.equal(fetchCalls, 1);
   assert.deepEqual(registered, [fresh]);
+});
+
+test("refresh prevents stale startup completion from overwriting fresh models", async () => {
+  const startup = deferred();
+  const refresh = deferred();
+  const stale = { ...model, id: "stale:cloud", baseId: "stale" };
+  const fresh = { ...model, id: "fresh:cloud", baseId: "fresh" };
+  const registered = [];
+  let fetchCalls = 0;
+  const loader = createCloudModelLoader(
+    deps({
+      fetch: () => {
+        fetchCalls++;
+        return fetchCalls === 1 ? startup.promise : refresh.promise;
+      },
+      register: (models) => registered.push(models),
+    }),
+  );
+
+  const startupLoad = loader.start();
+  const refreshLoad = loader.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(fetchCalls, 1);
+  startup.resolve([stale]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(fetchCalls, 2);
+  refresh.resolve([fresh]);
+  await Promise.all([startupLoad, refreshLoad]);
+  assert.deepEqual(loader.state(), { status: "ready", models: [fresh] });
+  assert.deepEqual(registered, [[stale], [fresh]]);
 });
 
 test("retry is a no-op unless the previous load failed", async () => {

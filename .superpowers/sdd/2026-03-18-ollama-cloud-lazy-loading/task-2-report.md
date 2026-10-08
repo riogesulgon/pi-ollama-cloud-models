@@ -32,3 +32,22 @@ passed
 
 - The failure status intentionally remains visible with `/ollama-cloud-retry` guidance until a retry or refresh succeeds.
 - Startup fetch failures are contained by the `session_start` handler; command failures are surfaced via `ctx.ui.notify` without rejecting the command handler.
+
+## Deterministic coverage follow-up
+
+- Replaced cache-dependent lifecycle assertions with a cache-isolated deferred fetch test proving duplicate `session_start` events share exactly one load.
+- Added deterministic fake-Pi coverage for command registration, failure status text, and non-throwing retry recovery.
+- Added a startup-versus-refresh deferred race test proving the forced refresh owns the final ready state.
+
+Verification:
+
+```text
+node --experimental-strip-types --test test/ollama-cloud-models.test.mjs
+19 tests, 19 passed, 0 failed
+
+node --experimental-strip-types --check extensions/ollama-cloud-models.ts
+passed
+
+git diff --check
+passed
+```
