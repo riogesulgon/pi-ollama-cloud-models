@@ -20,7 +20,11 @@
  *   tagged model    -> append "-cloud"   (e.g. gpt-oss:120b  -> gpt-oss:120b-cloud)
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -65,7 +69,10 @@ export interface CloudModelLoaderDeps {
   writeCache: (cache: CacheShape) => Promise<void>;
   fetch: (signal?: AbortSignal) => Promise<CloudModelDef[]>;
   register: (models: CloudModelDef[]) => void;
-  updateStatus: (status: unknown | null) => void | Promise<void>;
+  updateStatus: (
+    status: unknown | null,
+    ctx?: ExtensionContext,
+  ) => void | Promise<void>;
   now: () => number;
   timeout: (milliseconds: number) => AbortSignal | undefined;
 }
@@ -187,17 +194,19 @@ export function register(pi: ExtensionAPI, models: CloudModelDef[]): void {
 }
 
 export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
-  start: () => Promise<void>;
-  retry: () => Promise<void>;
+  start: (ctx?: ExtensionContext) => Promise<void>;
+  retry: (ctx?: ExtensionContext) => Promise<void>;
+  refresh: (ctx?: ExtensionContext) => Promise<void>;
   state: () => CloudModelLoaderState;
 } {
   let current: CloudModelLoaderState = { status: "idle" };
   let inFlight: Promise<void> | null = null;
+  let refreshInFlight: Promise<void> | null = null;
 
-  const load = async (): Promise<void> => {
+  const load = async (ctx: ExtensionContext | undefined, force: boolean): Promise<void> => {
     const updateStatus = (status: unknown | null): Promise<void> | undefined => {
       try {
-        const result = deps.updateStatus(status);
+        const result = deps.updateStatus(status, ctx);
         return result && typeof result.then === "function"
           ? result.catch(() => {})
           : undefined;
@@ -220,6 +229,7 @@ export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
       if (loadingStatus) await loadingStatus;
       cache = await deps.readCache();
       const cacheFresh =
+        !force &&
         cache !== null &&
         cache.models.length > 0 &&
         deps.now() - cache.fetchedAt < CACHE_TTL_MS;
@@ -257,16 +267,43 @@ export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
     }
   };
 
-  const start = (): Promise<void> => {
+  const start = (ctx?: ExtensionContext): Promise<void> => {
+    if (refreshInFlight) return refreshInFlight;
     if (inFlight) return inFlight;
-    inFlight = load().finally(() => {
+    inFlight = load(ctx, false).finally(() => {
       inFlight = null;
     });
     return inFlight;
   };
 
-  return { start, retry: start, state: () => current };
+  const retry = (ctx?: ExtensionContext): Promise<void> =>
+    current.status === "failed" ? start(ctx) : Promise.resolve();
+
+  const refresh = (ctx?: ExtensionContext): Promise<void> => {
+    if (refreshInFlight) return refreshInFlight;
+    const existing = inFlight;
+    const operation = (async () => {
+      if (existing) await existing.catch(() => {});
+      return startForced(ctx);
+    })();
+    refreshInFlight = operation.finally(() => {
+      refreshInFlight = null;
+    });
+    return refreshInFlight;
+  };
+
+  const startForced = (ctx?: ExtensionContext): Promise<void> => {
+    if (inFlight) return inFlight;
+    inFlight = load(ctx, true).finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
+  };
+
+  return { start, retry, refresh, state: () => current };
 }
+
+const STATUS_KEY = "ollama-cloud";
 
 function createDefaultLoader(pi: ExtensionAPI) {
   return createCloudModelLoader({
@@ -274,15 +311,57 @@ function createDefaultLoader(pi: ExtensionAPI) {
     writeCache,
     fetch: fetchCloudModels,
     register: (models) => register(pi, models),
-    updateStatus: (status) => {
-      if (status !== null) console.error("[ollama-cloud-models] load status:", status);
+    updateStatus: (status, ctx) => {
+      if (!ctx) {
+        if (status !== null) console.error("[ollama-cloud-models] load status:", status);
+        return;
+      }
+      if (status === "loading") {
+        ctx.ui.setStatus(STATUS_KEY, "Loading Ollama Cloud models…");
+      } else if (status === null) {
+        ctx.ui.setStatus(STATUS_KEY, undefined);
+      } else {
+        ctx.ui.setStatus(STATUS_KEY, "Ollama Cloud unavailable — /ollama-cloud-retry");
+      }
     },
     now: Date.now,
     timeout: (milliseconds) => AbortSignal.timeout(milliseconds),
   });
 }
 
-/** The factory is side-effect free; lifecycle wiring starts the loader later. */
+/** The factory is synchronous; lifecycle wiring starts the loader later. */
 export default function (pi: ExtensionAPI): void {
-  createDefaultLoader(pi);
+  const loader = createDefaultLoader(pi);
+
+  pi.on("session_start", (_event, ctx) => {
+    void loader.start(ctx).catch(() => {});
+  });
+
+  pi.registerCommand("ollama-cloud-refresh", {
+    description: "Force-refresh the Ollama Cloud model list from ollama.com",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      try {
+        await loader.refresh(ctx);
+        ctx.ui.notify("Ollama Cloud models refreshed", "info");
+      } catch (error) {
+        ctx.ui.notify(`Failed to refresh Ollama Cloud: ${String(error)}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("ollama-cloud-retry", {
+    description: "Retry a failed Ollama Cloud model load",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      if (loader.state().status !== "failed") {
+        ctx.ui.notify("Ollama Cloud does not need a retry", "info");
+        return;
+      }
+      try {
+        await loader.retry(ctx);
+        ctx.ui.notify("Ollama Cloud models loaded", "info");
+      } catch (error) {
+        ctx.ui.notify(`Ollama Cloud retry failed: ${String(error)}`, "error");
+      }
+    },
+  });
 }
