@@ -1,6 +1,6 @@
 {
   "name": "pi-ollama-cloud-models",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "pi extension that auto-discovers Ollama Cloud models from ollama.com and registers them as an `ollama-cloud` provider.",
   "keywords": ["pi-package", "ollama", "ollama-cloud", "pi", "extension"],
   "license": "MIT",
