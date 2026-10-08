@@ -42,3 +42,18 @@ Follow-up verification:
 node --experimental-strip-types --test test/ollama-cloud-models.test.mjs
 11 tests, 11 passed, 0 failed
 ```
+
+## Final review follow-up
+
+- Status reporting is now fully best-effort: synchronous throws and rejected cleanup promises cannot downgrade a successful ready state.
+- Cache persistence catches both synchronous throws and rejected promises.
+- Empty fresh responses retain and register a non-empty stale cache when available.
+- Stale fallback registration is guarded so fallback errors cannot mask the original failure.
+- Added regression coverage for rejected success cleanup and empty-fetch stale retention.
+
+Final verification:
+
+```text
+node --experimental-strip-types --test test/ollama-cloud-models.test.mjs
+13 tests, 13 passed, 0 failed
+```

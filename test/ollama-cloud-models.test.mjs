@@ -143,11 +143,34 @@ test("failed load transitions to failed and retry can succeed", async () => {
   assert.equal(loader.state().status, "ready");
 });
 
+test("rejected success status cleanup does not downgrade fresh load", async () => {
+  const stale = { fetchedAt: 1, models: [{ ...model, id: "stale:cloud", baseId: "stale" }] };
+  const fresh = { ...model, id: "fresh:cloud", baseId: "fresh" };
+  let registered;
+  const loader = createCloudModelLoader(
+    deps({
+      readCache: async () => stale,
+      fetch: async () => [fresh],
+      now: () => 60 * 60 * 1000 + 2,
+      register: (models) => {
+        registered = models;
+      },
+      updateStatus: (status) => {
+        if (status === null) throw new Error("status unavailable");
+      },
+    }),
+  );
+
+  await loader.start();
+  assert.deepEqual(registered, [fresh]);
+  assert.equal(loader.state().status, "ready");
+});
+
 test("cache write rejection does not fail a successful load", async () => {
   let registered;
   const loader = createCloudModelLoader(
     deps({
-      writeCache: async () => {
+      writeCache: () => {
         throw new Error("disk full");
       },
       register: (models) => {
@@ -225,6 +248,25 @@ test("provider mapping preserves cloud model fields", () => {
     maxTokens: 32768,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   }]);
+});
+
+test("empty fetch retains stale models", async () => {
+  const stale = { fetchedAt: 1, models: [model] };
+  let registered;
+  const loader = createCloudModelLoader(
+    deps({
+      readCache: async () => stale,
+      fetch: async () => [],
+      now: () => 60 * 60 * 1000 + 2,
+      register: (models) => {
+        registered = models;
+      },
+    }),
+  );
+
+  await loader.start();
+  assert.deepEqual(registered, [model]);
+  assert.deepEqual(loader.state(), { status: "ready", models: [model] });
 });
 
 test("stale cache is registered after fetch rejection", async () => {

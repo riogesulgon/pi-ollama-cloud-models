@@ -196,8 +196,22 @@ export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
 
   const load = async (): Promise<void> => {
     const updateStatus = (status: unknown | null): Promise<void> | undefined => {
-      const result = deps.updateStatus(status);
-      return result && typeof result.then === "function" ? result : undefined;
+      try {
+        const result = deps.updateStatus(status);
+        return result && typeof result.then === "function"
+          ? result.catch(() => {})
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const registerModels = (models: CloudModelDef[]): boolean => {
+      try {
+        deps.register(models);
+        return true;
+      } catch {
+        return false;
+      }
     };
     let cache: CacheShape | null = null;
     try {
@@ -219,6 +233,7 @@ export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
       }
 
       const models = await deps.fetch(deps.timeout(STARTUP_TIMEOUT_MS));
+      const effectiveModels = models.length > 0 ? models : cache?.models ?? [];
       if (models.length > 0) {
         deps.register(models);
         try {
@@ -226,20 +241,18 @@ export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
         } catch {
           // Cache is best-effort; a successful fetch remains ready.
         }
+      } else if (effectiveModels.length > 0) {
+        registerModels(effectiveModels);
       }
-      current = { status: "ready", models };
+      current = { status: "ready", models: effectiveModels };
       const readyStatus = updateStatus(null);
       if (readyStatus) await readyStatus;
     } catch (error) {
       const staleModels = cache?.models ?? [];
-      if (staleModels.length > 0) deps.register(staleModels);
+      if (staleModels.length > 0) registerModels(staleModels);
       current = { status: "failed", error, models: staleModels };
-      try {
-        const failedStatus = updateStatus(error);
-        if (failedStatus) await failedStatus;
-      } catch {
-        // Status reporting must not mask the original load failure.
-      }
+      const failedStatus = updateStatus(error);
+      if (failedStatus) await failedStatus;
       throw error;
     }
   };
