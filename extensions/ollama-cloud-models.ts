@@ -242,7 +242,7 @@ export function createCloudModelLoader(deps: CloudModelLoaderDeps): {
           // Cache is best-effort; a successful fetch remains ready.
         }
       } else if (effectiveModels.length > 0) {
-        registerModels(effectiveModels);
+        deps.register(effectiveModels);
       }
       current = { status: "ready", models: effectiveModels };
       const readyStatus = updateStatus(null);

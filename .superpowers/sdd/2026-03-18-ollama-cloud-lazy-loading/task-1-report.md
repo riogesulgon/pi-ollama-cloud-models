@@ -57,3 +57,15 @@ Final verification:
 node --experimental-strip-types --test test/ollama-cloud-models.test.mjs
 13 tests, 13 passed, 0 failed
 ```
+
+## Final consistency correction
+
+- Added a regression test proving that failed registration of stale models selected after an empty fetch transitions the loader to `failed`.
+- Changed that empty-fetch fallback to use the throwing registration path, allowing the outer error boundary to preserve the failure instead of incorrectly reporting `ready`.
+
+Final verification:
+
+```text
+node --experimental-strip-types --test test/ollama-cloud-models.test.mjs
+14 tests, 14 passed, 0 failed
+```

@@ -269,6 +269,23 @@ test("empty fetch retains stale models", async () => {
   assert.deepEqual(loader.state(), { status: "ready", models: [model] });
 });
 
+test("empty fetch with failed stale registration transitions to failed", async () => {
+  const stale = { fetchedAt: 1, models: [model] };
+  const loader = createCloudModelLoader(
+    deps({
+      readCache: async () => stale,
+      fetch: async () => [],
+      now: () => 60 * 60 * 1000 + 2,
+      register: () => {
+        throw new Error("registration failed");
+      },
+    }),
+  );
+
+  await assert.rejects(loader.start(), /registration failed/);
+  assert.equal(loader.state().status, "failed");
+});
+
 test("stale cache is registered after fetch rejection", async () => {
   const stale = { fetchedAt: 1, models: [model] };
   let registered;
